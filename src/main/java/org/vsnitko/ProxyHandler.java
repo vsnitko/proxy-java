@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.InflaterInputStream;
+import org.brotli.dec.BrotliInputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,6 +35,9 @@ public class ProxyHandler implements HttpHandler {
     public static final HttpClient httpClient = HttpClient.newBuilder()
         .followRedirects(HttpClient.Redirect.ALWAYS)
         .build();
+    public static final String EMPTY_HEADER_MSG =
+        "'%s' header must not be empty. " +
+        "Seems like you called proxy server directly, but it must be handled by nginx";
     private static final Logger log = LoggerFactory.getLogger(ProxyHandler.class);
 
     @Override
@@ -42,13 +46,12 @@ public class ProxyHandler implements HttpHandler {
         try {
             final Headers requestHeaders = clientExchange.getRequestHeaders();
 
+            final String protocol = Optional.ofNullable(requestHeaders.get("x-protocol"))
+                .orElseThrow(() -> new NullPointerException(format(EMPTY_HEADER_MSG, "x-protocol"))).get(0);
             final String host = Optional.ofNullable(requestHeaders.get("host"))
-                .orElseThrow(() -> new NullPointerException(
-                    "'host' header must not be empty. " +
-                    "Seems like you called proxy server directly, but it must be handled by nginx"
-                )).get(0);
+                .orElseThrow(() -> new NullPointerException(format(EMPTY_HEADER_MSG, "host"))).get(0);
             final String path = Optional.ofNullable(requestHeaders.get("x-original-uri")).orElse(List.of("")).get(0);
-            uri = URI.create(format("http://%s%s", host, path));
+            uri = URI.create(format("%s://%s%s", protocol, host, path));
 
             checkForSelfInvocation(uri);
 
@@ -56,7 +59,7 @@ public class ProxyHandler implements HttpHandler {
 
             sendResponseToClient(200, response, clientExchange);
             log.info("Success: {} {}", clientExchange.getRequestMethod(), uri);
-        } catch (Exception e) {
+        } catch (Throwable e) {
             log.error(format("Exception while %s %s: ", clientExchange.getRequestMethod(), uri), e);
             StringWriter sw = new StringWriter();
             PrintWriter pw = new PrintWriter(sw);
@@ -107,6 +110,8 @@ public class ProxyHandler implements HttpHandler {
             return new GZIPInputStream(responseBody).readAllBytes();
         } else if (encoding.get().equals("deflate")) {
             return new InflaterInputStream(responseBody).readAllBytes();
+        } else if (encoding.get().equals("br")) {
+            return new BrotliInputStream(responseBody).readAllBytes();
         }
         return responseBody.readAllBytes();
     }
